@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Anatomy Pro - Camera Zoom</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
+        
+        #ui {
+            position: absolute; top: 10px; left: 10px; z-index: 10;
+            color: white; background: rgba(0,0,0,0.85); padding: 15px; 
+            border-radius: 12px; border-left: 4px solid #00d2ff;
+            min-width: 220px; backdrop-filter: blur(8px);
+            pointer-events: none;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            font-size: 0.9rem;
+        }
+        h2 { margin: 0 0 10px 0; font-size: 1.1rem; text-transform: uppercase; color: #00d2ff; letter-spacing: 1px; }
+        
+        .status-row { display: flex; align-items: center; margin-bottom: 6px; color: #aaa; }
+        .status-icon { width: 25px; text-align: center; margin-right: 10px; font-weight: bold; }
+        .active { color: #fff; text-shadow: 0 0 10px white; font-weight: bold; }
+
+        #current-state {
+            margin-top: 10px; padding: 8px; background: #222; border-radius: 6px;
+            text-align: center; font-weight: bold; font-size: 1rem; border: 1px solid #444;
+            transition: all 0.3s;
+        }
+        .st-idle { color: #888; border-color: #888; }
+        .st-explode { color: #00d2ff; border-color: #00d2ff; background: rgba(0, 210, 255, 0.1); }
+        .st-grab { color: #ff0055; border-color: #ff0055; background: rgba(255, 0, 85, 0.1); box-shadow: 0 0 20px rgba(255,0,85,0.4); }
+
+        #selected-part { color: #ffff00; font-weight: bold; margin-top: 5px; min-height: 1.2em; text-align: center; }
+
+        #debug-console {
+            position: absolute; bottom: 0; left: 0; width: 100%; max-height: 100px;
+            background: rgba(50,0,0,0.8); color: #ffaaaa; font-family: monospace;
+            font-size: 10px; overflow-y: scroll; z-index: 999; pointer-events: none;
+            display: none;
+        }
+
+        #video-container {
+            position: absolute; bottom: 20px; right: 20px; z-index: 5;
+            width: 120px; height: 160px; border-radius: 12px; overflow: hidden;
+            border: 2px solid #333; transform: scaleX(-1); opacity: 0.5;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #00d2ff; font-size: 1.5rem; font-weight: bold;
+            background: #111; padding: 40px; border: 1px solid #00d2ff; border-radius: 50%;
+            width: 200px; height: 200px; display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 0 50px rgba(0, 210, 255, 0.2); z-index: 100; text-align: center;
+        }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loader">Caricamento...</div>
+    <div id="debug-console"></div>
+
+    <div id="ui">
+        <h2>Anatomy Controller</h2>
+        <div class="status-row" id="row-idle"><div class="status-icon">✊</div> Chiusa: Ruota Tutto</div>
+        <div class="status-row" id="row-explode"><div class="status-icon">🖐️</div> Aperta: Esplodi</div>
+        <div class="status-row" id="row-grab"><div class="status-icon">👌</div> Pinch: Camera ZOOM</div>
+        
+        <div id="current-state" class="st-idle">ATTESA</div>
+        <div id="selected-part">...</div>
+    </div>
+
+    <div id="video-container">
+        <video id="input-video" playsinline webkit-playsinline muted autoplay></video>
+    </div>
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+        function logError(msg) {
+            const consoleDiv = document.getElementById('debug-console');
+            consoleDiv.style.display = 'block';
+            consoleDiv.innerHTML += `<div>> ${msg}</div>`;
+            console.error(msg);
+        }
+        window.onerror = function(message) { logError(message); };
+
+        // --- 1. SETUP AMBIENTE ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050505);
+        
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
+        
+        // POSIZIONE STANDARD CAMERA
+        const CAMERA_DEFAULT_Z = 12;
+        const CAMERA_ZOOM_Z = 5; // Target quando fai pinch
+        let targetCameraZ = CAMERA_DEFAULT_Z;
+
+        camera.position.set(0, 0, CAMERA_DEFAULT_Z); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        document.body.appendChild(renderer.domElement);
+
+        // Luci
+        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+        const mainLight = new THREE.DirectionalLight(0xffffff, 2);
+        mainLight.position.set(5, 5, 5);
+        scene.add(mainLight);
+        const rimLight = new THREE.SpotLight(0x00d2ff, 5);
+        rimLight.position.set(-5, 5, -2);
+        scene.add(rimLight);
+
+        const pivotGroup = new THREE.Group();
+        scene.add(pivotGroup);
+
+        const cursorMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.05, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8, depthTest: false })
+        );
+        cursorMesh.renderOrder = 999; 
+        scene.add(cursorMesh);
+
+
+        // --- 2. DATI LOGICI ---
+        let partsData = [];
+        const STATE = { IDLE: 'idle', EXPLODE: 'explode', GRAB: 'grab' };
+        let currentState = STATE.IDLE;
+        
+        let grabbedObject = null;
+        let hoveredObject = null;
+        
+        let explosionFactor = 0;
+        let targetExplosion = 0;
+
+        let targetHand = { x: 0, y: 0, z: 0 }; 
+        let smoothHand = { x: 0, y: 0, z: 0 }; 
+        const SMOOTHING_FACTOR = 0.15; 
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        const uiState = document.getElementById('current-state');
+        const uiPart = document.getElementById('selected-part');
+        const loaderUi = document.getElementById('loader');
+
+        // --- 3. CARICAMENTO ---
+        const loader = new GLTFLoader();
+        const draco = new DRACOLoader();
+        draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+        loader.setDRACOLoader(draco);
+
+        loader.load('./modello.glb', (gltf) => {
+            const model = gltf.scene;
+            loaderUi.innerText = "Preparazione...";
+
+            const box = new THREE.Box3().setFromObject(model);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+
+            model.position.sub(center);
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 4.0 / maxDim; 
+            pivotGroup.scale.set(scale, scale, scale);
+            pivotGroup.add(model);
+
+            let index = 0;
+            model.traverse((child) => {
+                if (child.isMesh) {
+                    child.material = child.material.clone();
+                    child.material.transparent = true; 
+                    child.material.opacity = 1.0;
+                    
+                    if (!child.name) child.name = "Parte_" + index++;
+
+                    child.geometry.computeBoundingSphere();
+                    const meshCenter = child.geometry.boundingSphere.center.clone();
+                    meshCenter.applyMatrix4(child.matrix); 
+
+                    let explodeDir = meshCenter.clone().normalize();
+                    explodeDir.x += (Math.random() - 0.5) * 0.5;
+                    explodeDir.y += (Math.random() - 0.5) * 0.5;
+                    explodeDir.z += (Math.random() - 0.5) * 0.5;
+                    explodeDir.normalize().multiplyScalar(105.0); 
+
+                    partsData.push({
+                        mesh: child,
+                        originalPos: child.position.clone(),
+                        originalRot: child.quaternion.clone(),
+                        explodeVector: explodeDir
+                    });
+                }
+            });
+            loaderUi.style.display = 'none';
+
+        }, undefined, (err) => logError(err.message));
+
+
+        // --- 4. VISUALIZZAZIONE ---
+        function updateMaterials() {
+            partsData.forEach(part => {
+                const mesh = part.mesh;
+                const mat = mesh.material;
+                const isGrabbed = (grabbedObject === mesh);
+                const isHovered = (hoveredObject === mesh);
+
+                if (currentState === STATE.GRAB && grabbedObject) {
+                    if (isGrabbed) {
+                        mat.opacity = 1.0; mat.visible = true; mat.emissive.setHex(0x550000); 
+                    } else {
+                        mat.opacity = 0.0; mat.visible = false; 
+                    }
+                } else if (currentState === STATE.EXPLODE) {
+                    mat.visible = true;
+                    if (isHovered) {
+                        mat.opacity = 1.0; mat.emissive.setHex(0x333333); 
+                    } else {
+                        mat.opacity = 0.2; mat.emissive.setHex(0x000000);
+                    }
+                } else {
+                    mat.visible = true; mat.opacity = 1.0; mat.emissive.setHex(0x000000);
+                }
+            });
+        }
+
+        // --- 5. MEDIAPIPE LOGICA ---
+        function onResults(results) {
+            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+                if (currentState !== STATE.IDLE) changeState(STATE.IDLE);
+                cursorMesh.visible = false;
+                return;
+            }
+            cursorMesh.visible = true;
+
+            const landmarks = results.multiHandLandmarks[0];
+            const index = landmarks[8];
+            const thumb = landmarks[4];
+            const wrist = landmarks[0];
+
+            // CALCOLO POSIZIONE SMOOTH
+            const rawX = -( ((index.x + thumb.x)/2) * 2 ) + 1;
+            const rawY = -( ((index.y + thumb.y)/2) * 2 ) + 1;
+            
+            smoothHand.x += (rawX - smoothHand.x) * SMOOTHING_FACTOR;
+            smoothHand.y += (rawY - smoothHand.y) * SMOOTHING_FACTOR;
+            
+            const handX = smoothHand.x;
+            const handY = smoothHand.y;
+
+            // Cursore
+            const vec = new THREE.Vector3(handX, handY, 0.5);
+            vec.unproject(camera);
+            const dir = vec.sub(camera.position).normalize();
+            const distance = -camera.position.z / dir.z;
+            cursorMesh.position.copy(camera.position.clone().add(dir.multiplyScalar(distance)));
+
+            // Gesti
+            const pinchDist = Math.hypot(index.x - thumb.x, index.y - thumb.y);
+            const PINCH_START = 0.05; 
+            const PINCH_RELEASE = 0.12; 
+
+            let isPinching = (currentState === STATE.GRAB);
+            if (!isPinching && pinchDist < PINCH_START) isPinching = true;
+            else if (isPinching && pinchDist > PINCH_RELEASE) isPinching = false;
+
+            let openFingers = 0;
+            [8, 12, 16, 20].forEach(tip => { if (landmarks[tip].y < landmarks[tip-2].y) openFingers++; });
+
+            // --- MACCHINA A STATI ---
+            if (isPinching) {
+                changeState(STATE.GRAB);
+                
+                // INIZIO PRESA
+                if (!grabbedObject && hoveredObject) {
+                    grabbedObject = hoveredObject;
+                    uiPart.innerText = grabbedObject.name;
+                    updateMaterials();
+                }
+
+                // DURANTE LA PRESA
+                if (grabbedObject) {
+                    // Solo rotazione oggetto (Drag invertito)
+                    grabbedObject.rotation.y += (handX - targetHand.prevX || 0) * 8; 
+                    grabbedObject.rotation.x += (handY - targetHand.prevY || 0) * 8;
+                }
+
+            } else if (openFingers >= 3) {
+                if (grabbedObject) releaseObject();
+                changeState(STATE.EXPLODE);
+                // Rotazione Globale
+                pivotGroup.rotation.y -= (handX - (targetHand.prevX || 0)) * 2;
+                pivotGroup.rotation.x -= (handY - (targetHand.prevY || 0)) * 2;
+                
+            } else {
+                if (grabbedObject) releaseObject();
+                changeState(STATE.IDLE);
+                // Rotazione Globale
+                pivotGroup.rotation.y -= (handX - (targetHand.prevX || 0)) * 2;
+                pivotGroup.rotation.x -= (handY - (targetHand.prevY || 0)) * 2;
+            }
+
+            // Raycast
+            if (!grabbedObject) {
+                mouse.x = handX;
+                mouse.y = handY;
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(pivotGroup.children, true);
+                if (intersects.length > 0) {
+                    const obj = intersects[0].object;
+                    if (hoveredObject !== obj) {
+                        hoveredObject = obj;
+                        uiPart.innerText = obj.name;
+                        if (currentState === STATE.EXPLODE) updateMaterials();
+                    }
+                } else {
+                    if (hoveredObject) {
+                        hoveredObject = null;
+                        uiPart.innerText = "...";
+                        if (currentState === STATE.EXPLODE) updateMaterials();
+                    }
+                }
+            }
+
+            targetHand.prevX = handX;
+            targetHand.prevY = handY;
+        }
+
+        function releaseObject() {
+            if (grabbedObject) {
+                grabbedObject = null;
+                updateMaterials();
+            }
+        }
+
+        function changeState(newState) {
+            if (currentState === newState) return;
+            currentState = newState;
+
+            uiState.className = '';
+            document.querySelectorAll('.status-row').forEach(el => el.classList.remove('active'));
+
+            if (newState === STATE.IDLE) {
+                targetExplosion = 0;
+                targetCameraZ = CAMERA_DEFAULT_Z; // CAMERA LONTANA
+                
+                uiState.innerText = "RICOMPOSIZIONE";
+                uiState.classList.add('st-idle');
+                document.getElementById('row-idle').classList.add('active');
+
+            } else if (newState === STATE.EXPLODE) {
+                targetExplosion = 1;
+                targetCameraZ = CAMERA_DEFAULT_Z; // CAMERA LONTANA
+                
+                uiState.innerText = "ESPLOSIONE";
+                uiState.classList.add('st-explode');
+                document.getElementById('row-explode').classList.add('active');
+
+            } else if (newState === STATE.GRAB) {
+                // targetExplosion NON cambia (rimane come era)
+                targetCameraZ = CAMERA_ZOOM_Z; // CAMERA VICINA (ZOOM IN)
+                
+                uiState.innerText = "ZOOM DETTAGLIO";
+                uiState.classList.add('st-grab');
+                document.getElementById('row-grab').classList.add('active');
+            }
+            updateMaterials();
+        }
+
+        // --- 6. ANIMAZIONE ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // 1. ANIMAZIONE ESPLOSIONE
+            explosionFactor += (targetExplosion - explosionFactor) * 0.1;
+
+            // 2. ANIMAZIONE CAMERA (ZOOM FLUIDO)
+            // Interpolazione lineare (Lerp) della posizione Z della camera
+            camera.position.z += (targetCameraZ - camera.position.z) * 0.05;
+
+            // 3. ANIMAZIONE PARTI
+            if (partsData.length > 0) {
+                partsData.forEach(part => {
+                    if (grabbedObject === part.mesh) return;
+                    let targetPos = (currentState === STATE.EXPLODE) ? 
+                        part.originalPos.clone().add(part.explodeVector.clone().multiplyScalar(explosionFactor)) : 
+                        part.originalPos;
+
+                    part.mesh.position.lerp(targetPos, 0.1);
+                    part.mesh.quaternion.slerp(part.originalRot, 0.1);
+                    part.mesh.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
+                });
+            }
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // --- CAMERA SETUP ---
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        const videoElem = document.getElementById('input-video');
+        
+        const cameraUtils = new Camera(videoElem, {
+            onFrame: async () => { await hands.send({image: videoElem}); },
+            width: 1280, height: 720, facingMode: 'user'
+        });
+        
+        cameraUtils.start().catch(err => logError(err));
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
