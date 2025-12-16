@@ -194,10 +194,10 @@
                     meshCenter.applyMatrix4(child.matrix); 
 
                     let explodeDir = meshCenter.clone().normalize();
-                    explodeDir.x += (Math.random() - 0.5) * 0.5;
-                    explodeDir.y += (Math.random() - 0.5) * 0.5;
-                    explodeDir.z += (Math.random() - 0.5) * 0.5;
-                    explodeDir.normalize().multiplyScalar(1.0); 
+                    explodeDir.x += (Math.random() - 0.5) * 0.2;
+                    explodeDir.y += (Math.random() - 0.5) * 0.2;
+                    explodeDir.z += (Math.random() - 0.5) * 0.2;
+                    explodeDir.normalize().multiplyScalar(0.5); 
 
                     partsData.push({
                         mesh: child,
@@ -432,5 +432,6 @@
     </script>
 </body>
 </html>
+
 
 
