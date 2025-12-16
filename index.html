@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Anatomy Pro - Camera Zoom</title>
+    <title>3D Visualizer - PC Case </title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', sans-serif; }
         
@@ -197,7 +197,7 @@
                     explodeDir.x += (Math.random() - 0.5) * 0.5;
                     explodeDir.y += (Math.random() - 0.5) * 0.5;
                     explodeDir.z += (Math.random() - 0.5) * 0.5;
-                    explodeDir.normalize().multiplyScalar(105.0); 
+                    explodeDir.normalize().multiplyScalar(5.0); 
 
                     partsData.push({
                         mesh: child,
@@ -432,3 +432,4 @@
     </script>
 </body>
 </html>
+
